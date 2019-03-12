@@ -7,8 +7,8 @@
 
 
 int main(int argc, char* argv[]){
-	if ( argc < 4){
-		puts("python_file, function_name, queue_consommateur");
+	if ( argc < 2){
+		puts("queue_consommateur");
 		return 1;
 	}
 	PyObject *pName, *pModule, *pDict, *pFunc, *pValue, *pArgs;
@@ -20,7 +20,7 @@ int main(int argc, char* argv[]){
 	PyList_Append(path, PyUnicode_FromString("."));
 
 	// Nom de l'object
-	pName = PyUnicode_FromString(argv[1]);
+	pName = PyUnicode_FromString("amqp_receive");
 
 	// Chargement du module
 	pModule = PyImport_Import(pName);
@@ -34,13 +34,13 @@ int main(int argc, char* argv[]){
 	pDict = PyModule_GetDict(pModule);
 
 	//pFunc : fonction à appeler
-	pFunc = PyDict_GetItemString(pDict, argv[2]);
+	pFunc = PyDict_GetItemString(pDict, "reception");
 
 	if (PyCallable_Check(pFunc))
 	{
 	// creation de la liste des arguments appelés
-		pArgs = PyTuple_New(argc -3);
-		pValue=PyUnicode_FromString(argv[3]);
+		pArgs = PyTuple_New(argc -1);
+		pValue=PyUnicode_FromString(argv[1]);
 		if (!pValue)
 		{
 			PyErr_Print();
