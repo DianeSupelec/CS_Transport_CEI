@@ -7,22 +7,22 @@
 
 
 int main(int argc, char* argv[]){
-	if ( argc < 2){
-		puts("queue_consommateur");
+	if ( argc < 4){
+		puts("message, consumer_queue, routing key");
 		return 1;
 	}
 	PyObject *pName, *pModule, *pDict, *pFunc, *pValue, *pArgs;
 	
-	// Initialisation de l'interpreteur python
+	// Initialization of the Python Interpreter
 	Py_Initialize();
 	PyObject *sys = PyImport_ImportModule("sys");
 	PyObject *path = PyObject_GetAttrString(sys, "path");
 	PyList_Append(path, PyUnicode_FromString("."));
 
-	// Nom de l'object
-	pName = PyUnicode_FromString("amqp_receive");
+	// Name of the object
+	pName = PyUnicode_FromString("amqp_send");
 
-	// Chargement du module
+	// Load the Module
 	pModule = PyImport_Import(pName);
 	if (!pModule)
 	{
@@ -30,24 +30,25 @@ int main(int argc, char* argv[]){
 		printf("ERROR in pModule \n");
 		return 1;
 	}
-	//pDict a regarder
-	pDict = PyModule_GetDict(pModule);
 
-	//pFunc : fonction à appeler
-	pFunc = PyDict_GetItemString(pDict, "reception");
+	pDict = PyModule_GetDict(pModule);
+	pFunc = PyDict_GetItemString(pDict, "sending");
 
 	if (PyCallable_Check(pFunc))
 	{
-	// creation de la liste des arguments appelés
+	// Creation of the arguments list for the Python Function
 		pArgs = PyTuple_New(argc -1);
-		pValue=PyUnicode_FromString(argv[1]);
-		if (!pValue)
+		for (int i=0; i<argc-1; i++)
 		{
-			PyErr_Print();
-			return 1;
+			pValue=PyUnicode_FromString(argv[i+1]);
+			if (!pValue)
+			{
+				PyErr_Print();
+				return 1;
+			}
+			PyTuple_SetItem(pArgs, i, pValue);
 		}
-		PyTuple_SetItem(pArgs, 0, pValue);
-		//appel de la fonction
+		// call python function
 		pValue = PyObject_CallObject(pFunc, pArgs);
 		if (pArgs != NULL)
 		{

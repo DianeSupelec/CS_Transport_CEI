@@ -4,8 +4,9 @@ import logging
 import ssl
 
 
-#Fonction d'un message via TLS par le serveru RabbitMQ
-def envoie(message_a_envoyer,queue_conso, cle_routage):
+#Send a message with AMQP and TLS
+def sending(message,queue_consumer, routing_key):
+	# Connection Options
 	logging.basicConfig(level=logging.INFO)
 	cp=pika.ConnectionParameters(
 	ssl=True,
@@ -15,11 +16,13 @@ def envoie(message_a_envoyer,queue_conso, cle_routage):
 	keyfile="/root/mqtt-client/certs/client1.key",
 	certfile="/root/mqtt-client/certs/client1.pem",
 	cert_reqs=ssl.CERT_REQUIRED))
+	#Connection
 	connection = pika.BlockingConnection(cp)
 	channel = connection.channel()
-	channel.queue_declare(queue=queue_conso)
-	message =message_a_envoyer
-	channel.publish(exchange='', routing_key=cle_routage, body=message)
+	channel.queue_declare(queue=queue_consumer)
+	#Sending
+	message =message
+	channel.publish(exchange='', routing_key=routing_key, body=message)
 	print(" [x] Sent %r" % message)
 	connection.close()
 	return 0
