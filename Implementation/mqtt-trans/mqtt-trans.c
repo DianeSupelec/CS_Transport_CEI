@@ -211,6 +211,12 @@ int MQTT_transporter_new(MQTT_transporter_t **new, int * const rfd, const char *
 		free(newtrans);
 		return ret;
 	}
+	ret = fcntl(fdpipe[0], F_SETFL, (fcntl(fdpipe[0], F_GETFL) | O_NONBLOCK));
+	if ( ret < 0 ){
+		perror("fcntl failed while making read-end pipe non blocking: ");
+		free(newtrans);
+		return ret;
+	}
 
 	size = snprintf(newtrans->address, 0, "ssl://%s:%u", address, port);
 	newtrans->address = malloc(sizeof(*newtrans->address) * (size + 1));
