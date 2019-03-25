@@ -30,6 +30,7 @@ class AMQPClient(object):
         self.queues_index = 0
         self.mutex_stop = threading.Lock()
         self.has_to_stop = False
+        self.sem_terminated = threading.Semaphore(0)
         
 
     def set_pkicredentials(self, pubcert, privkey, cacert):
@@ -60,6 +61,7 @@ class AMQPClient(object):
         self._channel = None
         if self._closing:
             self._connection.ioloop.stop()
+            self.sem_terminated.release();
         else:
             self._connection.add_timeout(5, self.reconnect)
 
@@ -249,6 +251,7 @@ class AMQPThread(threading.Thread):
         amqpthread.AMQPclient.mutex_stop.acquire()
         amqpthread.AMQPclient.has_to_stop = True
         amqpthread.AMQPclient.mutex_stop.release()
+        amqpthread.AMQPclient.sem_terminated.acquire()
 
 """
 AMQPProducerThread, herits from AMQPThread
