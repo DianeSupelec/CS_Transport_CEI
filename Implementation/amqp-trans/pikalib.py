@@ -147,7 +147,7 @@ class AMQPProducer(AMQPClient):
         self.mutex_msgs.acquire()
         for msg in self.msgs:
             for j in range(0, len(self.queues)): 
-                print("Publishing msg %s ! exchange : %s queue %s", msg, self.exchange, self.queues[j])          
+                #print("Publishing msg %s ! exchange : %s queue %s", msg, self.exchange, self.queues[j])          
                 self._channel.basic_publish(exchange=self.exchange, routing_key=self.queues[j], body=msg)
         self.msgs = []
         self.mutex_msgs.release()
@@ -199,8 +199,8 @@ class AMQPConsumer(AMQPClient):
             self._channel.close()
 
     def on_message(self, unused_channel, basic_deliver, properties, body):
-        print('Received message # %s from %s: %s',
-                    basic_deliver.delivery_tag, properties.app_id, body.decode("utf-8"))
+        #print('Received message # %s from %s: %s',
+        #            basic_deliver.delivery_tag, properties.app_id, body.decode("utf-8"))
         self.acknowledge_message(basic_deliver.delivery_tag)
         self.mutex_w_pipe.acquire()
         
@@ -321,7 +321,7 @@ def AMQPThread_stop(amqpthread):
 def AMQPThread_set_exchange(amqpthread, exchange):
     amqpthread.set_exchange(exchange)
     return 0
-
+'''
 def main():
     producer = AMQPProducerThread_new('localhost', '5671')
     AMQPThread_set_pkicredentials(producer, "client1.pem", "client1.key", "trustedCA.pem")
@@ -348,4 +348,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
+'''
