@@ -1,821 +1,301 @@
-#include </usr/include/python3.5m/Python.h>
-#include <stdio.h>
+#include "config.h"
 #include <stdlib.h>
-#include <string.h>
 #include <errno.h>
-#include <assert.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <pthread.h>
 
-#define PIKALIBDIR "/root/Documents/CS_Transport_CEI/Implementation/amqp-trans"
-#define PYTHONFILE "pikalib"
-#define AMQPPRODUCERTHREAD_NEW "AMQPProducerThread_new"
-#define AMQPCONSUMERTHREAD_NEW "AMQPConsumerThread_new"
-#define AMQPTHREAD_SET_PKICREDENTIALS "AMQPThread_set_pkicredentials"
-#define AMQPPRODUCERTHREAD_ADD_QUEUE "AMQPProducerThread_add_queue"
-#define AMQPCONSUMERTHREAD_ADD_QUEUE "AMQPConsumerThread_add_queue"
-#define AMQPCONSUMERTHREAD_GET_RFD "AMQPConsumerThread_get_rfd"
-#define AMQPPRODUCERTHREAD_SEND_MSG "AMQPProducerThread_send_msg"
-#define AMQPTHREAD_START "AMQPThread_start"
-#define AMQPTHREAD_STOP "AMQPThread_stop"
-#define AMQPTHREAD_SET_EXCHANGE "AMQPThread_set_exchange"
+#include "cpikalib.h"
+#include "amqp-trans.h"
 
-#define return_val_if_null(obj, val) do{ if ( !obj ) return val; }while(0)
+#define return_val_if_null(obj, val) do{ if ( ! ( obj ) ){\
+                                     		fputs( #obj " is NULL\n", stderr);\
+                                     		return (val) ;\
+                                     	 }\
+                        	    }while(0)
 
-int AMQPProducerThread_new(PyObject **pProducer, char* address, unsigned int port, PyObject *pModule)
+#define return_if_null(obj) do{ if ( ! ( obj ) ){\
+                            		fputs( #obj " is NULL\n", stderr);\
+                           		return ;\
+                            	}\
+                     	    }while(0)
+
+typedef enum { AMQP_TRANSPORTER_NEED_CREDS, AMQP_TRANSPORTER_CONNECTED, AMQP_TRANSPORTER_DISCONNECTED } AMQP_transporter_state;
+
+struct AMQP_transporter {
+	struct {
+		PyObject *module;
+		PyObject *producer;
+		PyObject *consumer;
+	} client;
+
+	AMQP_transporter_state state;
+	
+	char *address;
+	unsigned int port;
+
+	pthread_t thread;
+};
+
+int AMQP_transporter_new(AMQP_transporter_t **new, int * const rfd, const char *address, const unsigned int port)
 {
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
+	AMQP_transporter_t *newtrans;
+	int ret, tmprfd;
 
-	return_val_if_null(pProducer, -1);
+	return_val_if_null(new, -1);
+	return_val_if_null(rfd, -1);
 	return_val_if_null(address, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPPRODUCERTHREAD_NEW);
 	
-	if ( !pFunc )
+	newtrans = calloc(1, sizeof(*newtrans));
+	if ( !newtrans )
 		return -1;
 	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
+	newtrans->address = strdup(address);
+	if ( !newtrans->address ){
+		free(newtrans);
 		return -1;
 	}
 
-	pArgs = PyTuple_New(2);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
+	newtrans->port = port;
 	
-	pValue = PyUnicode_FromString(address);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
+	ret = cpl_init(&newtrans->client.module);
+	if ( ret < 0 ){
+		free(newtrans->address);
+		free(newtrans);
 		return -1;
 	}
 
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
+	ret = cpl_AMQP_producer_new(&newtrans->client.producer, address, port, newtrans->client.module);
+	if ( ret < 0 ){
+		free(newtrans->address);
+		cpl_finalize();
+		free(newtrans);
 		return -1;
 	}
 
-	pValue = PyLong_FromLong(port);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
+	ret = cpl_AMQP_consumer_new(&newtrans->client.consumer, address, port, newtrans->client.module);
+	if ( ret < 0 ){
+		free(newtrans->address);
+		cpl_destroy(newtrans->client.producer);
+		cpl_finalize();
+		free(newtrans);
 		return -1;
 	}
 
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
+	ret = cpl_AMQP_consumer_get_rfd(newtrans->client.consumer, &tmprfd);
+	if ( ret < 0 ){
+		free(newtrans->address);
+		cpl_destroy(newtrans->client.producer);
+		cpl_destroy(newtrans->client.consumer);
+		cpl_finalize();
+		free(newtrans);
+		return -1;
+	}
+	*rfd = tmprfd;
+
+	ret = fcntl(*rfd, F_SETFL, (fcntl(*rfd, F_GETFL) | O_NONBLOCK));
+	if ( ret < 0 ){
+		perror("fcntl failed while making read-end of pipe non blocking: ");
+		free(newtrans->address);
+		close(*rfd);	
+		cpl_destroy(newtrans->client.producer);
+		cpl_destroy(newtrans->client.consumer);
+		cpl_finalize();
+		free(newtrans);
 		return -1;
 	}
 
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		*pProducer = pValue;
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return 0;
-	}
-}
+	newtrans->state = AMQP_TRANSPORTER_NEED_CREDS;
 
-int AMQPConsumerThread_new(PyObject **pConsumer, char* address, unsigned int port, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(pConsumer, -1);
-	return_val_if_null(address, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPCONSUMERTHREAD_NEW);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(2);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = PyUnicode_FromString(address);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyLong_FromLong(port);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		*pConsumer = pValue;
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return 0;
-	}
+	*new = newtrans;
 	return 0;
 }
 
-int AMQPThread_set_pkicredentials(PyObject *amqpthread, char *pubcert, char *privkey, char *cacert, PyObject *pModule)
+int AMQP_transporter_set_pkicredentials(AMQP_transporter_t * const trans, const char *pubcert_filename, const char *privkey_filename, const char *cacert_filename)
 {
 	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
+	return_val_if_null(trans, -1);
+	return_val_if_null(pubcert_filename, -1);
+	return_val_if_null(privkey_filename, -1);
+	return_val_if_null(cacert_filename, -1);
 
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(pubcert, -1);
-	return_val_if_null(privkey, -1);
-	return_val_if_null(cacert, -1);
-	return_val_if_null(pModule, -1);
 
-	pFunc = PyObject_GetAttrString(pModule, AMQPTHREAD_SET_PKICREDENTIALS);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
+	if ( trans->state != AMQP_TRANSPORTER_NEED_CREDS ){
+		fputs("Already has credentials\n", stderr);
 		return -1;
 	}
 
-	pArgs = PyTuple_New(4);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
+	ret = cpl_AMQP_set_pkicredentials(trans->client.producer, pubcert_filename, privkey_filename, cacert_filename);
+	if ( ret < 0 ){
+		fputs("Failed to set pki credentials\n", stderr);
+		return ret;
 	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
+	ret = cpl_AMQP_set_pkicredentials(trans->client.consumer, pubcert_filename, privkey_filename, cacert_filename);
+	if ( ret < 0 ){
+		fputs("Failed to set pki credentials\n", stderr);
+		return ret;
 	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyUnicode_FromString(pubcert);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyUnicode_FromString(privkey);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 2, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-	
-	pValue = PyUnicode_FromString(cacert);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 3, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-	
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQPProducerThread_add_queue(PyObject *amqpthread,char *queue, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(queue, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPPRODUCERTHREAD_ADD_QUEUE);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(2);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyUnicode_FromString(queue);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQPConsumerThread_add_queue(PyObject *amqpthread,char *queue, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(queue, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPCONSUMERTHREAD_ADD_QUEUE);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(2);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyUnicode_FromString(queue);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQPConsumerThread_get_rfd(PyObject *amqpthread,char *queue, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(queue, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPCONSUMERTHREAD_GET_RFD);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(2);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyUnicode_FromString(queue);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQPProducerThread_send_msg(PyObject *amqpthread,char *msg, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(msg, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPPRODUCERTHREAD_SEND_MSG);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(2);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyUnicode_FromString(msg);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQPThread_start(PyObject *amqpthread, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPTHREAD_START);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(1);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQPThread_stop(PyObject *amqpthread, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPTHREAD_STOP);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(1);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		Py_DECREF(amqpthread);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQPThread_set_exchange(PyObject *amqpthread, char *exchange, PyObject *pModule)
-{
-	int ret;
-	PyObject *pFunc, *pValue, *pArgs;
-
-	return_val_if_null(amqpthread, -1);
-	return_val_if_null(exchange, -1);
-	return_val_if_null(pModule, -1);
-
-	pFunc = PyObject_GetAttrString(pModule, AMQPTHREAD_SET_EXCHANGE);
-	
-	if ( !pFunc )
-		return -1;
-	
-	if ( !PyCallable_Check(pFunc) ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-
-	pArgs = PyTuple_New(2);
-	if ( !pArgs ){
-		Py_DECREF(pFunc);
-		return -1;
-	}
-	
-	pValue = amqpthread;
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 0, pValue);
-	Py_INCREF(amqpthread);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	pValue = PyUnicode_FromString(exchange);
-	if ( !pValue ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}
-
-	ret = PyTuple_SetItem(pArgs, 1, pValue);
-	if ( ret != 0 ){
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return -1;
-	}
-
-	
-	pValue = PyObject_CallObject(pFunc, pArgs);
-	if ( !pValue ){
-		PyErr_Print();
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		return -1;
-	}else{
-		Py_DECREF(pFunc);
-		Py_DECREF(pArgs);
-		Py_DECREF(pValue);
-		return 0;
-	}
-	return 0;
-}
-
-int AMQP_init(PyObject **Module)
-{
-	PyObject *pValue, *pModule;
-
-	Py_Initialize();
-
-	pValue=PyUnicode_FromString(PYTHONFILE);
-	if ( !pValue ){
-		Py_Finalize();
-		return -1;
-	}
-
-    PyRun_SimpleString("import sys; sys.path.insert(0, '" PIKALIBDIR "')");
-	pModule = PyImport_Import(pValue);
-	Py_DECREF(pValue);
-	if ( pModule == NULL ){
-		Py_Finalize();
-		return -1;
-	}
-	*Module = pModule;	
+	trans->state = AMQP_TRANSPORTER_DISCONNECTED;
 	return 0;	
 }
-int AMQP_finalize(PyObject *Module){
-	Py_DECREF(Module);
-	Py_Finalize();
+
+int AMQP_transporter_add_pub_queue(AMQP_transporter_t * const trans, const char * queuename)
+{
+	int ret;
+	return_val_if_null(trans, -1);
+	return_val_if_null(queuename, -1);
+	
+
+	if ( trans->state != AMQP_TRANSPORTER_NEED_CREDS && trans->state != AMQP_TRANSPORTER_DISCONNECTED ){
+		fputs("Current state does not allow adding queue\n", stderr);
+		return -1;
+	}
+		
+	ret = cpl_AMQP_add_queue(trans->client.producer, queuename);
+	if ( ret < 0 ){
+		fputs("Failed to add publication queue\n", stderr);
+		return ret;
+	}
 	return 0;
 }
-/*
-int main (){
-	PyObject *pModule;
-	PyObject *producer, *consumer;
-	int res;
 
-	if (AMQP_init(&pModule) < 0){
-		fputs("Failed to init Python\n", stderr);
+int AMQP_transporter_add_sub_queue(AMQP_transporter_t * const trans, const char * queuename)
+{
+	int ret;
+	return_val_if_null(trans, -1);
+	return_val_if_null(queuename, -1);
+	
+
+	if ( trans->state != AMQP_TRANSPORTER_NEED_CREDS && trans->state != AMQP_TRANSPORTER_DISCONNECTED ){
+		fputs("Current state does not allow adding queue\n", stderr);
 		return -1;
-    };
+	}
+
+	ret = cpl_AMQP_add_queue(trans->client.consumer, queuename);
+	if ( ret < 0 ){
+		fputs("Failed to add subscription queue\n", stderr);
+		return ret;
+	}
+	return 0;
+}
+
+int AMQP_transporter_send(AMQP_transporter_t * const trans, const void *buffer, size_t len)
+{
+	int ret;
+	return_val_if_null(trans, -1);
+	return_val_if_null(buffer, -1);
 	
-	res= AMQPProducerThread_new(&producer, "localhost", 5671, pModule);
-	printf("creation producer : %d\n", res);
 	
-	res = AMQPThread_set_pkicredentials(producer, "client1.pem", "client1.key", "trustedCA.pem",pModule);
-    printf("set pki credential producer : %d\n", res);
-
-	res = AMQPConsumerThread_new(&consumer,"localhost", 5671 ,pModule);
-    printf("creation consumer : %d\n", res);
-    
-    res= AMQPThread_set_pkicredentials(consumer, "client2.pem", "client2.key", "trustedCA.pem",pModule);
-	printf("pki consumer : %d\n", res);
-
-	res = AMQPProducerThread_add_queue(producer, "Test",pModule);
-    printf("queue producer 1 : %d\n", res);
-    res = AMQPProducerThread_add_queue(producer, "Blop",pModule);
-	printf("queue producer 2 : %d\n", res);
-
-	res=AMQPConsumerThread_add_queue(consumer, "Test",pModule);
-    printf("queue consumer 1 : %d\n", res);
-    res=AMQPConsumerThread_add_queue(consumer, "Blop",pModule);
-	printf("queue consumer 2 : %d\n", res);
-
-	res=AMQPThread_start(consumer, pModule);
-    printf("start consumer : %d\n", res);
-    
-	res=AMQPThread_start(producer,pModule);
-	printf("start producer: %d\n", res);
-
+	if ( trans->state != AMQP_TRANSPORTER_CONNECTED ){
+		fputs("Transporter is not connected, sending is not allowed\n", stderr);
+		return -1;
+	}
 	
-    res=AMQPProducerThread_send_msg(producer, "Nianiania",pModule);
-    printf("envoi msg : %d\n", res);
+	ret = cpl_AMQP_producer_send_msg(trans->client.producer, buffer, len);
+	if ( ret < 0 ){
+		fputs("Failed to send\n", stderr);
+		return ret;
+	}
+	return ret;
+}
 
-    printf("Sleeping\n");
-    sleep(5);
-    printf("Waken up\n");
 
-    res=AMQPThread_stop(consumer,pModule);
-    printf("stop consumer : %d\n", res); 
-    
-    res=AMQPThread_stop(producer,pModule);
-    printf("stop producer : %d\n", res);
-      
-	AMQP_finalize(pModule);
-  }
+#define JOIN_TIMEOUT 0.2f
+static void *check_python_threads(void *data)
+{
+	AMQP_transporter_t *trans;
 
-*/
+	int prod_alive, cons_alive;
+	
+	trans = (AMQP_transporter_t *) data;
+	prod_alive = cons_alive = 1;
+	
+	while ( prod_alive || cons_alive ){
+		if ( prod_alive ){
+			cpl_AMQP_join(trans->client.producer, JOIN_TIMEOUT);
+			prod_alive = cpl_AMQP_is_alive(trans->client.producer);
+		}
+		if ( cons_alive ){
+			cpl_AMQP_join(trans->client.consumer, JOIN_TIMEOUT);
+			prod_alive = cpl_AMQP_is_alive(trans->client.consumer);
+		}	
+	}
+	pthread_exit((void *) 0);
+}
+
+int AMQP_transporter_connect(AMQP_transporter_t * const trans)
+{
+	int ret;
+
+	return_val_if_null(trans, -1);
+	
+	
+	if ( trans->state == AMQP_TRANSPORTER_CONNECTED ){
+		fputs("Already connected\n", stderr);
+		return 0;
+	}
+	if ( trans->state != AMQP_TRANSPORTER_DISCONNECTED ){
+		fputs("Transporter not ready for connection\n", stderr);
+		return -1;
+	}
+
+	ret = cpl_AMQP_start(trans->client.producer);
+	if ( ret < 0 )
+		fputs("Failed to start producer\n", stderr);
+	ret = cpl_AMQP_start(trans->client.consumer);
+	if ( ret < 0 )
+		fputs("Failed to start consumer\n", stderr);
+	
+	trans->state = AMQP_TRANSPORTER_CONNECTED;
+	
+	ret = pthread_create(&trans->thread, NULL, check_python_threads, (void *) trans);
+	return ret;		
+}
+
+int AMQP_transporter_disconnect(AMQP_transporter_t * const trans)
+{
+	int ret;
+
+	if ( trans->state == AMQP_TRANSPORTER_DISCONNECTED ){
+		fputs("Already disconnected\n", stderr);
+		return 0;
+	}
+	if ( trans->state != AMQP_TRANSPORTER_CONNECTED ){
+		fputs("Transporter is neither connected nor ready to connect\n", stderr);
+		return -1;
+	}
+	
+	ret = cpl_AMQP_stop(trans->client.producer);
+	if ( ret < 0 )
+		fputs("Failed to stop producer\n", stderr);
+	ret = cpl_AMQP_stop(trans->client.consumer);
+	if ( ret < 0 )
+		fputs("Failed to stop consumer\n", stderr);
+	
+	trans->state = AMQP_TRANSPORTER_DISCONNECTED;
+
+	return 0;
+}
+
+int AMQP_transporter_destroy(AMQP_transporter_t **trans)
+{
+	return_val_if_null(trans, 0);
+	return_val_if_null(*trans, 0);
+	
+	if ( (*trans)->state == AMQP_TRANSPORTER_CONNECTED ){
+		fputs("Transporter is still connected\n", stderr);
+		return -1;
+	}
+
+	if ( (*trans)->address )
+		free((*trans)->address);
+	
+	cpl_finalize();
+	free(*trans);
+	*trans = NULL;
+
+	return 0;	
+}
+

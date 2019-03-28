@@ -1,25 +1,18 @@
-import logging
 import pika
 import ssl
-import threading
-import time
 import os
+import base64
+import threading
 
+import time
 
-"""
-AMQPObject stub.
-Handle connection and exchange declaration
-Methods start_working and stop_working are
-called respectively when exchange is set and
-when terminating the object. Thus they shall
-be overriden in child classes
-"""
-class AMQPClient(object):
-    exchange = 'direct_prelude'
-    exchange_type = 'direct'
+class AMQPClient(threading.Thread):
+    exchange = "direct_prelude"
+    exchange_type = "direct"
     CHECK_FOR_STOP_INTERVAL = 2
 
     def __init__(self, address, port):
+        threading.Thread.__init__(self)
         self._connection = None
         self._channel = None
         self._closing = False
@@ -31,7 +24,6 @@ class AMQPClient(object):
         self.mutex_stop = threading.Lock()
         self.has_to_stop = False
         self.sem_terminated = threading.Semaphore(0)
-        
 
     def set_pkicredentials(self, pubcert, privkey, cacert):
         self._conn_params = pika.ConnectionParameters(self._address, self._port, '/', 
@@ -74,7 +66,6 @@ class AMQPClient(object):
     def open_channel(self):
         self._connection.channel(on_open_callback=self.on_channel_open)
 
-    
     def on_channel_open(self, channel):
         self._channel = channel
         self._channel.add_on_close_callback(self.on_channel_closed)
@@ -109,19 +100,24 @@ class AMQPClient(object):
     def close_channel(self):
         self._channel.close()
 
+    def request_stop(self):
+        if self.queues :
+            self.mutex_stop.acquire()
+            self.has_to_stop = True
+            self.mutex_stop.release()
+            self.sem_terminated.acquire()
+
     def stop(self):
         self._closing = True
         self.stop_working()
         self._connection.ioloop.start()
 
     def run(self):
-        self._connection = self.connect()
-        self._connection.ioloop.start()
+        if self.queues:
+            self._connection = self.connect()
+            self._connection.ioloop.start()
 
-"""
-AMQPProducer, herits from AMQPClient
-Provide methods for publishing messages
-"""
+
 class AMQPProducer(AMQPClient):
     FLUSH_INTERVAL = 1
 
@@ -131,12 +127,10 @@ class AMQPProducer(AMQPClient):
         self.mutex_msgs = threading.Lock()
 
     def send_msg(self, msg):
+        b64_msg = base64.standard_b64encode(msg)
         self.mutex_msgs.acquire()
-        self.msgs.append(msg)
+        self.msgs.append(b64_msg)
         self.mutex_msgs.release()
-
-    def add_pub_queue(self, queue):
-        self.add_queue(queue)
 
     def flush_msgs_loop(self):
         self.flush_msgs()
@@ -161,18 +155,11 @@ class AMQPProducer(AMQPClient):
             self.flush_msgs()
             self.close_channel()
 
-""" 
-AMQPConsumer, herits from AMQPClient
-Handle the reception of messages
-"""
 class AMQPConsumer(AMQPClient):
     def __init__(self, address, port):
         AMQPClient.__init__(self, address, port)
         self.rfd, self.wfd = os.pipe()
         self.mutex_w_pipe = threading.Lock()
-
-    def add_sub_queue(self, queue):
-        self.add_queue(queue)
 
     def setup_queues(self):
         self.queues_len = len(self.queues)
@@ -180,6 +167,8 @@ class AMQPConsumer(AMQPClient):
         for i in range(0, self.queues_len):
             self._channel.queue_declare(self.on_queue_declareok, self.queues[i])
 
+    def get_rfd(self):
+        return self.rfd
 
     def on_queue_declareok(self, method_frame):        
         self._channel.queue_bind(self.on_bindok, self.queues[self.queues_index],
@@ -198,12 +187,10 @@ class AMQPConsumer(AMQPClient):
         if self._channel:
             self._channel.close()
 
-    def on_message(self, unused_channel, basic_deliver, properties, body):
-        #print('Received message # %s from %s: %s',
-        #            basic_deliver.delivery_tag, properties.app_id, body.decode("utf-8"))
+    def on_message(self, unused_channel, basic_deliver, properties, b64body):
         self.acknowledge_message(basic_deliver.delivery_tag)
+        body = base64.standard_b64decode(b64body)
         self.mutex_w_pipe.acquire()
-        
         os.write(self.wfd, body)
         self.mutex_w_pipe.release()
 
@@ -216,6 +203,7 @@ class AMQPConsumer(AMQPClient):
             self._consumer_tag = self._channel.basic_consume(self.on_message,
                                                          self.queues[i])
     def on_cancelok(self, unused_frame):
+        os.close(self.rfd)
         self.close_channel()
 
     def start_working(self):
@@ -226,126 +214,3 @@ class AMQPConsumer(AMQPClient):
         if self._channel:
             self._channel.basic_cancel(self.on_cancelok, self._consumer_tag)
 
-    
-"""
-AMQPThread stub.
-Contains an AMQPclient within a thread
-to avoid blocking the main thread in
-th I/O loop
-Provides a function to terminate the
-embedded AMQPclient, which results in
-the termination of the Thread
-"""
-class AMQPThread(threading.Thread):
-
-    def __init__(self):
-        threading.Thread.__init__(self)
-        self.AMQPclient = None
-    def set_pkicredentials(self, pubcert, privkey, cacert):
-        self.AMQPclient.set_pkicredentials(pubcert, privkey, cacert)
-    def set_exchange(self, exchange):
-        self.AMQPclient.set_exchange(exchange)
-    def run(self):
-        self.AMQPclient.run()
-    def requestStop(amqpthread):
-        amqpthread.AMQPclient.mutex_stop.acquire()
-        amqpthread.AMQPclient.has_to_stop = True
-        amqpthread.AMQPclient.mutex_stop.release()
-        amqpthread.AMQPclient.sem_terminated.acquire()
-
-"""
-AMQPProducerThread, herits from AMQPThread
-Contains an AMQPProducer as AMQPclient
-"""
-class AMQPProducerThread(AMQPThread):
-    def __init__(self, address, port):
-        AMQPThread.__init__(self)
-        self.AMQPclient = AMQPProducer(address, port)
-    
-    def add_pub_queue(self, queue):
-        self.AMQPclient.add_queue(queue)
-    
-    def send_msg(self, msg):
-        self.AMQPclient.send_msg(msg)
-
-"""
-AMQPConsumerThread, herits from AMQPThread
-Contains an AMQPConsumer as AMQPclient
-"""
-class AMQPConsumerThread(AMQPThread):
-    def __init__(self, address, port):
-        AMQPThread.__init__(self)
-        self.AMQPclient = AMQPConsumer(address, port)
-    
-    def add_sub_queue(self, queue):
-        self.AMQPclient.add_queue(queue)
-    
-    def get_rfd(self):
-        return self.AMQPclient.rfd
-
-def AMQPProducerThread_new(address, port):
-    producer = AMQPProducerThread(address, port)
-    return producer
-
-def AMQPConsumerThread_new(address, port):
-    consumer = AMQPConsumerThread(address, port)
-    return consumer
-
-def AMQPThread_set_pkicredentials(amqpthread, pubcert, privkey, cacert):
-    amqpthread.set_pkicredentials(pubcert, privkey, cacert)
-    return 0
-
-def AMQPProducerThread_add_queue(amqpthread, queue):
-    amqpthread.add_pub_queue(queue)
-    return 0
-
-def AMQPConsumerThread_add_queue(amqpthread, queue):
-    amqpthread.add_sub_queue(queue)
-    return 0
-
-def AMQPConsumerThread_get_rfd(amqpthread, queue):
-    return amqpthread.get_rfd()
-
-def AMQPProducerThread_send_msg(amqpthread, msg):
-    amqpthread.send_msg(msg)
-    return 0
-
-def AMQPThread_start(amqpthread):
-    amqpthread.start()
-    return 0
-
-def AMQPThread_stop(amqpthread):
-    amqpthread.requestStop()
-    return 0
-
-def AMQPThread_set_exchange(amqpthread, exchange):
-    amqpthread.set_exchange(exchange)
-    return 0
-'''
-def main():
-    producer = AMQPProducerThread_new('localhost', '5671')
-    AMQPThread_set_pkicredentials(producer, "client1.pem", "client1.key", "trustedCA.pem")
-    
-    consumer = AMQPConsumerThread_new('localhost', '5671')
-    AMQPThread_set_pkicredentials(consumer, "client2.pem", "client2.key", "trustedCA.pem")
-
-    AMQPProducerThread_add_queue(producer, "Toto")
-    AMQPProducerThread_add_queue(producer, "Tata")
-
-    AMQPConsumerThread_add_queue(consumer, "Toto")
-    AMQPConsumerThread_add_queue(consumer, "Tata")
-
-    AMQPThread_start(consumer)
-    AMQPThread_start(producer)
-
-    AMQPProducerThread_send_msg(producer, "Hello there Gen Kenobi")
-    print("Sleeping")
-    time.sleep(15)
-    print("Waken up")
-
-    AMQPThread_stop(consumer)
-    AMQPThread_stop(producer)
-
-if __name__ == '__main__':
-    main()
-'''
